@@ -41,6 +41,10 @@ local NOTE_NAMES = {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"}
 local SUBDIVISIONS = { 1/8, 1/6, 1/4, 1/3, 1/2, 1, 2 }
 local SUB_NAMES    = { "1/32","1/24","1/16","1/12","1/8","1/4","1/2" }
 
+-- Screen zones
+local SCREEN_W = 128
+local SCREEN_H = 64
+
 -- -------------------------
 -- STATE
 -- -------------------------
@@ -73,6 +77,13 @@ local state = {
 
   -- last triggered note (for display)
   last_note   = nil,
+
+  -- screen rendering state
+  beat_phase  = 0,       -- phase of beat pulse (0-1)
+  popup_param = nil,     -- current parameter name in popup
+  popup_val   = nil,     -- current parameter value
+  popup_time  = 0,       -- time remaining for popup display
+  screen_clock = 0,      -- clock for screen refresh
 }
 
 -- init steps
@@ -251,6 +262,7 @@ local function clock_tick()
       end
       
       state.step_pos = (state.step_pos % GRID_W) + 1
+      state.beat_phase = 0  -- reset beat phase on downbeat
       grid_redraw()
     end
   end
@@ -330,76 +342,151 @@ g.key = function(col, row, z)
 end
 
 -- -------------------------
--- NORNS UI
+-- SCREEN RENDERING
 -- -------------------------
+
+local function draw_status_strip()
+  -- y 0-8: STATUS STRIP
+  screen.level(4)
+  screen.font_size(8)
+  screen.move(0, 7)
+  screen.text("BASS")
+  
+  -- Current scale name at center (level 6)
+  screen.level(6)
+  local scale_name = SCALES[state.scale_idx].name
+  screen.move(SCREEN_W / 2 - 20, 7)
+  screen.text(scale_name)
+  
+  -- Beat pulse dot at x=124 (right side)
+  -- Flashes level 15 on downbeat, decays via sine to level 2
+  local pulse_brightness = 2
+  if state.beat_phase < 0.3 then
+    -- Fast decay from 15 to 2 over first 30% of beat
+    local decay = 1 - (state.beat_phase / 0.3)
+    pulse_brightness = 2 + (15 - 2) * decay * decay
+  end
+  screen.level(math.floor(pulse_brightness))
+  screen.rect(124, 2, 3, 3)
+  screen.fill()
+end
+
+local function draw_live_zone()
+  -- y 9-52: LIVE ZONE (16-step grid sequencer)
+  local zone_top = 9
+  local zone_height = 44
+  local zone_bottom = zone_top + zone_height
+  
+  local step_width = SCREEN_W / GRID_W
+  local sc = SCALES[state.scale_idx].intervals
+  local num_degrees = #sc
+  
+  for step = 1, GRID_W do
+    local x = (step - 1) * step_width
+    local note = state.steps[step]
+    
+    -- Playhead: full-height thin line at level 15 with level 3 background
+    if step == state.step_pos then
+      screen.level(3)
+      screen.rect(x, zone_top, step_width, zone_height)
+      screen.fill()
+    end
+    
+    -- Draw step indicator
+    if note then
+      -- Calculate pitch height (higher note = higher position)
+      local degree = find_scale_degree(note)
+      if degree then
+        local pitch_height = (degree / num_degrees) * zone_height
+        local bar_y = zone_bottom - pitch_height
+        
+        -- Active steps at level 12
+        screen.level(12)
+        screen.rect(x + 1, bar_y, step_width - 2, pitch_height)
+        screen.fill()
+      end
+    else
+      -- Empty steps: small dot at baseline at level 3
+      screen.level(3)
+      screen.rect(x + step_width / 2 - 1, zone_bottom - 2, 2, 2)
+      screen.fill()
+    end
+    
+    -- Playhead thin line overlay at level 15
+    if step == state.step_pos then
+      screen.level(15)
+      screen.rect(x, zone_top, 1, zone_height)
+      screen.fill()
+    end
+  end
+end
+
+local function draw_context_bar()
+  -- y 53-58: CONTEXT BAR
+  screen.level(8)
+  screen.font_size(8)
+  screen.move(0, 62)
+  screen.text(NOTE_NAMES[state.root + 1] .. " " .. SCALES[state.scale_idx].name)
+  
+  -- BPM at center
+  screen.level(6)
+  screen.move(SCREEN_W / 2 - 10, 62)
+  screen.text(math.floor(state.bpm) .. " BPM")
+  
+  -- Octave range at right
+  screen.level(5)
+  screen.move(SCREEN_W - 30, 62)
+  screen.text("Oct " .. state.octave)
+  
+  -- MIDI channel at far right
+  screen.level(4)
+  screen.move(SCREEN_W - 15, 62)
+  screen.text("Ch 1")
+end
+
+local function draw_parameter_popup()
+  -- TRANSIENT PARAMETER POPUP: param name + value at level 15 with dark bg
+  if state.popup_param and state.popup_time > 0 then
+    local popup_text = state.popup_param .. ": " .. tostring(state.popup_val)
+    
+    -- Dark background rect
+    screen.level(0)
+    screen.rect(20, 25, 90, 15)
+    screen.fill()
+    
+    -- Text
+    screen.level(15)
+    screen.font_size(8)
+    screen.move(25, 35)
+    screen.text(popup_text)
+  end
+end
 
 function redraw()
   screen.clear()
   screen.aa(1)
-
-  -- title
-  screen.level(15)
-  screen.font_size(8)
-  screen.move(0, 8)
-  screen.text("BASS")
-
-  -- status
-  screen.level(state.playing and 15 or 5)
-  screen.move(30, 8)
-  screen.text(state.playing and "PLAY" or "STOP")
-
-  -- MIDI transpose indicator
-  if state.midi_transpose_active then
-    screen.level(12)
-    screen.move(60, 8)
-    screen.text("MIDI T:" .. (state.midi_transpose_note or 0))
-  end
-
-  -- BPM
-  screen.level(10)
-  screen.move(0, 22)
-  screen.text("BPM  " .. math.floor(state.bpm))
-
-  -- subdivision
-  screen.move(0, 32)
-  screen.text("DIV  " .. SUB_NAMES[state.sub_idx])
-
-  -- swing
-  screen.move(60, 22)
-  screen.text("SWING " .. state.swing)
-
-  -- auto mutate
-  screen.move(60, 32)
-  screen.text(state.auto_mutate and "AUTO MUT ON" or "AUTO MUT OFF")
-
-  -- scale
-  local sc_name = SCALES[state.scale_idx].name
-  screen.move(0, 42)
-  screen.text("SCL  " .. sc_name)
-
-  -- root + octave
-  screen.move(0, 52)
-  screen.text("ROOT " .. NOTE_NAMES[state.root + 1] .. "  OCT " .. state.octave)
-
-  -- last note
-  if state.last_note then
-    screen.level(15)
-    screen.move(0, 62)
-    screen.text("NOTE " .. NOTE_NAMES[(state.last_note % 12) + 1]
-      .. math.floor(state.last_note / 12 - 1))
-  end
-
-  -- step dots
-  for i = 1, GRID_W do
-    local x = 80 + (i - 1) * 3
-    local has_note = state.steps[i] ~= nil
-    local is_pos = (i == state.step_pos)
-    screen.level(is_pos and 15 or (has_note and 8 or 2))
-    screen.rect(x, 56, 2, has_note and 6 or 2)
-    screen.fill()
-  end
-
+  
+  draw_status_strip()
+  draw_live_zone()
+  draw_context_bar()
+  draw_parameter_popup()
+  
   screen.update()
+end
+
+-- -------------------------
+-- SCREEN CLOCK
+-- -------------------------
+
+local function screen_clock()
+  while true do
+    clock.sleep(0.1)  -- ~10 fps
+    state.beat_phase = (state.beat_phase + 0.1) % 1.0
+    if state.popup_time > 0 then
+      state.popup_time = state.popup_time - 0.1
+    end
+    redraw()
+  end
 end
 
 -- -------------------------
@@ -410,11 +497,20 @@ function enc(n, d)
   if n == 1 then
     state.bpm = util.clamp(state.bpm + d, 20, 300)
     clock.tempo = state.bpm
+    state.popup_param = "BPM"
+    state.popup_val = math.floor(state.bpm)
+    state.popup_time = 0.8
   elseif n == 2 then
     state.sub_idx = util.clamp(state.sub_idx + d, 1, #SUBDIVISIONS)
+    state.popup_param = "Subdivision"
+    state.popup_val = SUB_NAMES[state.sub_idx]
+    state.popup_time = 0.8
   elseif n == 3 then
     state.volume = util.clamp(state.volume + d * 0.02, 0, 1)
     engine.amp(state.volume)
+    state.popup_param = "Volume"
+    state.popup_val = math.floor(state.volume * 100) .. "%"
+    state.popup_time = 0.8
   end
   grid_redraw()
   redraw()
@@ -451,8 +547,9 @@ function init()
   -- init MIDI input
   init_midi()
 
-  -- start clock coroutine
+  -- start clock coroutines
   clock.run(clock_tick)
+  clock.run(screen_clock)
 
   grid_redraw()
   redraw()
