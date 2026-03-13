@@ -14,6 +14,7 @@
 -- keys:
 --   K2 : toggle play/stop
 --   K3 : clear sequence
+--   K1+K3 : mutate pattern (drunk walk)
 
 engine.name = "PolyPerc"
 
@@ -45,6 +46,7 @@ local SUB_NAMES    = { "1/32","1/24","1/16","1/12","1/8","1/4","1/2" }
 -- -------------------------
 
 local g = grid.connect()
+local m = nil
 
 local state = {
   playing     = false,
@@ -55,10 +57,16 @@ local state = {
   bpm         = 120,
   volume      = 0.7,
   note_len    = 0.1,     -- note gate length in seconds
+  swing       = 0,       -- swing amount (0-100)
+  auto_mutate = false,   -- auto mutation on/off
+  auto_mutate_bars = 4,  -- mutate every N bars
+  midi_transpose_active = false,
+  midi_transpose_note = nil,
 
   -- sequence: 16 steps, each can hold a note or nil
   steps       = {},
   step_pos    = 1,       -- current playback position
+  bar_count   = 0,
 
   -- currently held pads (for live note tracking)
   held        = {},      -- {col, row} -> midi note
@@ -86,6 +94,43 @@ end
 
 local function midi_to_hz(midi)
   return 440 * 2^((midi - 69) / 12)
+end
+
+-- -------------------------
+-- SWING & MUTATION SYSTEM
+-- -------------------------
+
+local function mutate_pattern()
+  -- Drunk walk: randomly shift 1-3 notes by ±1 scale degree
+  local num_mutations = math.random(1, 3)
+  local sc = SCALES[state.scale_idx].intervals
+  local num_degrees = #sc
+  
+  for _ = 1, num_mutations do
+    local step = math.random(1, GRID_W)
+    if state.steps[step] ~= nil then
+      local degree_idx = find_scale_degree(state.steps[step])
+      if degree_idx then
+        local direction = math.random() < 0.5 and 1 or -1
+        local new_degree = degree_idx + direction
+        if new_degree >= 0 and new_degree < num_degrees then
+          local octave = math.floor(state.steps[step] / 12)
+          state.steps[step] = scale_note(new_degree, octave - 24)
+        end
+      end
+    end
+  end
+end
+
+local function find_scale_degree(midi)
+  local sc = SCALES[state.scale_idx].intervals
+  local note_in_octave = (midi - 24 - state.root) % 12
+  for i, interval in ipairs(sc) do
+    if interval == note_in_octave then
+      return i - 1
+    end
+  end
+  return nil
 end
 
 -- -------------------------
@@ -168,16 +213,69 @@ local function play_note(midi)
   redraw()
 end
 
-local function clock_tick ()
+local function clock_tick()
   while true do
     clock.sync(SUBDIVISIONS[state.sub_idx])
     if state.playing then
       local note = state.steps[state.step_pos]
+      
+      -- Apply MIDI input transposition
+      if state.midi_transpose_active and state.midi_transpose_note then
+        local transposition = state.midi_transpose_note - state.root
+        if note then
+          note = note + transposition
+        end
+      end
+      
       if note then
         play_note(note)
       end
+      
+      -- Apply swing delay for even-numbered steps
+      local swing_delay = 0
+      if state.swing > 0 and state.step_pos % 2 == 0 then
+        local beat_duration = clock.get_beat_sec()
+        swing_delay = (state.swing / 100) * 0.5 * beat_duration
+      end
+      
+      if swing_delay > 0 then
+        clock.sleep(swing_delay)
+      end
+      
+      -- Track bars for auto-mutation
+      if state.step_pos == GRID_W then
+        state.bar_count = state.bar_count + 1
+        if state.auto_mutate and state.bar_count % state.auto_mutate_bars == 0 then
+          mutate_pattern()
+        end
+      end
+      
       state.step_pos = (state.step_pos % GRID_W) + 1
       grid_redraw()
+    end
+  end
+end
+
+-- -------------------------
+-- MIDI INPUT
+-- -------------------------
+
+local function init_midi()
+  m = midi.connect(1)
+  if m then
+    m.event = function(data)
+      local msg = midi.to_msg(data)
+      if msg.type == "note_on" and msg.vel > 0 then
+        -- Transpose to held MIDI note
+        state.midi_transpose_active = true
+        state.midi_transpose_note = msg.note % 12  -- Get semitone class
+        redraw()
+      elseif msg.type == "note_off" or (msg.type == "note_on" and msg.vel == 0) then
+        -- Release transposition
+        state.midi_transpose_active = false
+        state.midi_transpose_note = nil
+        redraw()
+      end
     end
   end
 end
@@ -188,7 +286,7 @@ end
 
 g.key = function(col, row, z)
   if z == 1 then
-    -- rows 16: note pads
+    -- rows 1-6: note pads
     if row <= 6 then
       local degree = col - 1
       local oct_offset = (6 - row)
@@ -250,6 +348,13 @@ function redraw()
   screen.move(30, 8)
   screen.text(state.playing and "PLAY" or "STOP")
 
+  -- MIDI transpose indicator
+  if state.midi_transpose_active then
+    screen.level(12)
+    screen.move(60, 8)
+    screen.text("MIDI T:" .. (state.midi_transpose_note or 0))
+  end
+
   -- BPM
   screen.level(10)
   screen.move(0, 22)
@@ -258,6 +363,14 @@ function redraw()
   -- subdivision
   screen.move(0, 32)
   screen.text("DIV  " .. SUB_NAMES[state.sub_idx])
+
+  -- swing
+  screen.move(60, 22)
+  screen.text("SWING " .. state.swing)
+
+  -- auto mutate
+  screen.move(60, 32)
+  screen.text(state.auto_mutate and "AUTO MUT ON" or "AUTO MUT OFF")
 
   -- scale
   local sc_name = SCALES[state.scale_idx].name
@@ -334,6 +447,9 @@ function init()
 
   -- set initial clock
   params:set("clock_tempo", state.bpm)
+
+  -- init MIDI input
+  init_midi()
 
   -- start clock coroutine
   clock.run(clock_tick)
