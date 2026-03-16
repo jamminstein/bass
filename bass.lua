@@ -89,6 +89,10 @@ local state = {
 -- init steps
 for i = 1, GRID_W do state.steps[i] = nil end
 
+-- Clock IDs for cleanup
+local clock_tick_id = nil
+local screen_clock_id = nil
+
 -- -------------------------
 -- MUSIC UTILS
 -- -------------------------
@@ -547,16 +551,19 @@ function init()
   -- init MIDI input
   init_midi()
 
-  -- start clock coroutines
-  clock.run(clock_tick)
-  clock.run(screen_clock)
+  -- start clock coroutines and store IDs
+  clock_tick_id = clock.run(clock_tick)
+  screen_clock_id = clock.run(screen_clock)
 
   grid_redraw()
   redraw()
 end
 
 function cleanup()
-  clock.cancel_all()
+  -- Cancel all clock runs
+  if clock_tick_id then clock.cancel(clock_tick_id) end
+  if screen_clock_id then clock.cancel(screen_clock_id) end
+  
   if g then g:all(0); g:refresh() end
   if m then
     for ch = 1, 16 do
