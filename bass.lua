@@ -1,6 +1,6 @@
 -- bass.lua
 -- scale-locked, clock-locked grid bass instrument
--- 
+--
 -- grid layout:
 --   rows 1-6  : note pads (columns = scale degrees, rows = octaves)
 --   row 7     : root note selector (cols 1-12)
@@ -115,12 +115,14 @@ end
 -- SWING & MUTATION SYSTEM
 -- -------------------------
 
+local find_scale_degree  -- forward declaration (defined below)
+
 local function mutate_pattern()
   -- Drunk walk: randomly shift 1-3 notes by ±1 scale degree
   local num_mutations = math.random(1, 3)
   local sc = SCALES[state.scale_idx].intervals
   local num_degrees = #sc
-  
+
   for _ = 1, num_mutations do
     local step = math.random(1, GRID_W)
     if state.steps[step] ~= nil then
@@ -137,7 +139,7 @@ local function mutate_pattern()
   end
 end
 
-local function find_scale_degree(midi)
+find_scale_degree = function(midi)
   local sc = SCALES[state.scale_idx].intervals
   local note_in_octave = (midi - 24 - state.root) % 12
   for i, interval in ipairs(sc) do
@@ -233,7 +235,7 @@ local function clock_tick()
     clock.sync(SUBDIVISIONS[state.sub_idx])
     if state.playing then
       local note = state.steps[state.step_pos]
-      
+
       -- Apply MIDI input transposition
       if state.midi_transpose_active and state.midi_transpose_note then
         local transposition = state.midi_transpose_note - state.root
@@ -241,22 +243,22 @@ local function clock_tick()
           note = note + transposition
         end
       end
-      
+
       if note then
         play_note(note)
       end
-      
+
       -- Apply swing delay for even-numbered steps
       local swing_delay = 0
       if state.swing > 0 and state.step_pos % 2 == 0 then
         local beat_duration = clock.get_beat_sec()
         swing_delay = (state.swing / 100) * 0.5 * beat_duration
       end
-      
+
       if swing_delay > 0 then
         clock.sleep(swing_delay)
       end
-      
+
       -- Track bars for auto-mutation
       if state.step_pos == GRID_W then
         state.bar_count = state.bar_count + 1
@@ -264,7 +266,7 @@ local function clock_tick()
           mutate_pattern()
         end
       end
-      
+
       state.step_pos = (state.step_pos % GRID_W) + 1
       state.beat_phase = 0  -- reset beat phase on downbeat
       grid_redraw()
@@ -355,13 +357,13 @@ local function draw_status_strip()
   screen.font_size(8)
   screen.move(0, 7)
   screen.text("BASS")
-  
+
   -- Current scale name at center (level 6)
   screen.level(6)
   local scale_name = SCALES[state.scale_idx].name
   screen.move(SCREEN_W / 2 - 20, 7)
   screen.text(scale_name)
-  
+
   -- Beat pulse dot at x=124 (right side)
   -- Flashes level 15 on downbeat, decays via sine to level 2
   local pulse_brightness = 2
@@ -380,22 +382,22 @@ local function draw_live_zone()
   local zone_top = 9
   local zone_height = 44
   local zone_bottom = zone_top + zone_height
-  
+
   local step_width = SCREEN_W / GRID_W
   local sc = SCALES[state.scale_idx].intervals
   local num_degrees = #sc
-  
+
   for step = 1, GRID_W do
     local x = (step - 1) * step_width
     local note = state.steps[step]
-    
+
     -- Playhead: full-height thin line at level 15 with level 3 background
     if step == state.step_pos then
       screen.level(3)
       screen.rect(x, zone_top, step_width, zone_height)
       screen.fill()
     end
-    
+
     -- Draw step indicator
     if note then
       -- Calculate pitch height (higher note = higher position)
@@ -403,7 +405,7 @@ local function draw_live_zone()
       if degree then
         local pitch_height = (degree / num_degrees) * zone_height
         local bar_y = zone_bottom - pitch_height
-        
+
         -- Active steps at level 12
         screen.level(12)
         screen.rect(x + 1, bar_y, step_width - 2, pitch_height)
@@ -415,7 +417,7 @@ local function draw_live_zone()
       screen.rect(x + step_width / 2 - 1, zone_bottom - 2, 2, 2)
       screen.fill()
     end
-    
+
     -- Playhead thin line overlay at level 15
     if step == state.step_pos then
       screen.level(15)
@@ -431,17 +433,17 @@ local function draw_context_bar()
   screen.font_size(8)
   screen.move(0, 62)
   screen.text(NOTE_NAMES[state.root + 1] .. " " .. SCALES[state.scale_idx].name)
-  
+
   -- BPM at center
   screen.level(6)
   screen.move(SCREEN_W / 2 - 10, 62)
   screen.text(math.floor(state.bpm) .. " BPM")
-  
+
   -- Octave range at right
   screen.level(5)
   screen.move(SCREEN_W - 30, 62)
   screen.text("Oct " .. state.octave)
-  
+
   -- MIDI channel at far right
   screen.level(4)
   screen.move(SCREEN_W - 15, 62)
@@ -452,12 +454,12 @@ local function draw_parameter_popup()
   -- TRANSIENT PARAMETER POPUP: param name + value at level 15 with dark bg
   if state.popup_param and state.popup_time > 0 then
     local popup_text = state.popup_param .. ": " .. tostring(state.popup_val)
-    
+
     -- Dark background rect
     screen.level(0)
     screen.rect(20, 25, 90, 15)
     screen.fill()
-    
+
     -- Text
     screen.level(15)
     screen.font_size(8)
@@ -469,12 +471,12 @@ end
 function redraw()
   screen.clear()
   screen.aa(1)
-  
+
   draw_status_strip()
   draw_live_zone()
   draw_context_bar()
   draw_parameter_popup()
-  
+
   screen.update()
 end
 
@@ -563,7 +565,7 @@ function cleanup()
   -- Cancel all clock runs
   if clock_tick_id then clock.cancel(clock_tick_id) end
   if screen_clock_id then clock.cancel(screen_clock_id) end
-  
+
   if g then g:all(0); g:refresh() end
   if m then
     for ch = 1, 16 do
