@@ -36,10 +36,21 @@ local SCALES = {
   { name = "pentatonic", intervals = {0,2,4,7,9} },
 }
 
+local BASS_SCALES = {
+  { name = "chromatic",   intervals = {0,1,2,3,4,5,6,7,8,9,10,11} },
+  { name = "blues",       intervals = {0,3,5,6,7,10} },
+  { name = "minor_pent",  intervals = {0,3,5,7,10} },
+  { name = "dorian",      intervals = {0,2,3,5,7,9,10} },
+  { name = "mixolydian",  intervals = {0,2,4,5,7,9,10} },
+  { name = "major",       intervals = {0,2,4,5,7,9,11} },
+}
+
 local NOTE_NAMES = {"C","C#","D","D#","E","F","F#","G","G#","A","A#","B"}
 
 local SUBDIVISIONS = { 1/8, 1/6, 1/4, 1/3, 1/2, 1, 2 }
 local SUB_NAMES    = { "1/32","1/24","1/16","1/12","1/8","1/4","1/2" }
+
+local QUANTIZE_OPTS = { "free", "1/4", "1/8", "1/16", "1/32" }
 
 -- Screen zones
 local SCREEN_W = 128
@@ -77,6 +88,7 @@ local state = {
 
   -- last triggered note (for display)
   last_note   = nil,
+  last_held_note = nil,  -- for legato mode
 
   -- screen rendering state
   beat_phase  = 0,       -- phase of beat pulse (0-1)
@@ -84,6 +96,21 @@ local state = {
   popup_val   = nil,     -- current parameter value
   popup_time  = 0,       -- time remaining for popup display
   screen_clock = 0,      -- clock for screen refresh
+
+  -- legato mode
+  legato      = false,   -- when true, don't send note_off between notes
+
+  -- quantize mode
+  quantize_idx = 1,      -- index into QUANTIZE_OPTS (1 = "free")
+
+  -- bass scale selector
+  bass_scale_idx = 1,    -- index into BASS_SCALES
+
+  -- pattern recording
+  recording   = false,   -- currently recording pattern
+  record_buffer = {},    -- table of {note, time_offset}
+  record_start_time = nil,
+  pattern_loop_id = nil, -- clock ID for pattern loop playback
 }
 
 -- init steps
@@ -97,9 +124,17 @@ local screen_clock_id = nil
 -- MUSIC UTILS
 -- -------------------------
 
+local function get_active_scale()
+  -- returns the active scale: BASS_SCALES if bass_scale_idx is set, else SCALES
+  if state.bass_scale_idx and state.bass_scale_idx > 0 then
+    return BASS_SCALES[state.bass_scale_idx]
+  end
+  return SCALES[state.scale_idx]
+end
+
 local function scale_note(degree, octave)
   -- degree: 0-based index into scale intervals
-  local sc = SCALES[state.scale_idx].intervals
+  local sc = get_active_scale().intervals
   local len = #sc
   local oct_offset = math.floor(degree / len)
   local interval = sc[(degree % len) + 1]
@@ -111,6 +146,19 @@ local function midi_to_hz(midi)
   return 440 * 2^((midi - 69) / 12)
 end
 
+local function apply_quantize()
+  -- snap current clock position to nearest quantize subdivision
+  if QUANTIZE_OPTS[state.quantize_idx] == "free" then
+    return  -- no quantization
+  end
+
+  local quant_val = tonumber(QUANTIZE_OPTS[state.quantize_idx]:match("1/(%d+)"))
+  if quant_val then
+    local quant_beat = 4 / quant_val  -- convert to beat fractions
+    clock.sync(quant_beat)
+  end
+end
+
 -- -------------------------
 -- SWING & MUTATION SYSTEM
 -- -------------------------
@@ -120,7 +168,7 @@ local find_scale_degree  -- forward declaration (defined below)
 local function mutate_pattern()
   -- Drunk walk: randomly shift 1-3 notes by ±1 scale degree
   local num_mutations = math.random(1, 3)
-  local sc = SCALES[state.scale_idx].intervals
+  local sc = get_active_scale().intervals
   local num_degrees = #sc
 
   for _ = 1, num_mutations do
@@ -140,7 +188,7 @@ local function mutate_pattern()
 end
 
 find_scale_degree = function(midi)
-  local sc = SCALES[state.scale_idx].intervals
+  local sc = get_active_scale().intervals
   local note_in_octave = (midi - 24 - state.root) % 12
   for i, interval in ipairs(sc) do
     if interval == note_in_octave then
@@ -158,7 +206,7 @@ local function grid_redraw()
   if not g then return end
   g:all(0)
 
-  local sc = SCALES[state.scale_idx].intervals
+  local sc = get_active_scale().intervals
   local num_degrees = #sc
 
   -- rows 1-6: note pads
@@ -222,11 +270,18 @@ end
 
 local function play_note(midi)
   if midi == nil then return end
+
+  -- Handle legato: send note_off only if legato is off
+  if not state.legato and state.last_held_note ~= nil and state.last_held_note ~= midi then
+    engine.hz(0)  -- silent stop for synthesis engine
+  end
+
   local hz = midi_to_hz(midi)
   engine.hz(hz)
   engine.amp(state.volume)
   engine.release(state.note_len)
   state.last_note = midi
+  state.last_held_note = midi
   redraw()
 end
 
@@ -234,6 +289,9 @@ local function clock_tick()
   while true do
     clock.sync(SUBDIVISIONS[state.sub_idx])
     if state.playing then
+      -- Apply quantize if enabled
+      apply_quantize()
+
       local note = state.steps[state.step_pos]
 
       -- Apply MIDI input transposition
@@ -299,6 +357,39 @@ local function init_midi()
 end
 
 -- -------------------------
+-- PATTERN RECORDING
+-- -------------------------
+
+local function start_pattern_record()
+  state.recording = true
+  state.record_buffer = {}
+  state.record_start_time = clock.get_beat_sec()
+end
+
+local function stop_and_loop_pattern()
+  state.recording = false
+
+  -- Cancel any existing pattern loop
+  if state.pattern_loop_id then
+    clock.cancel(state.pattern_loop_id)
+  end
+
+  if #state.record_buffer == 0 then return end
+
+  -- Start looping recorded pattern
+  state.pattern_loop_id = clock.run(function()
+    while true do
+      for _, note_event in ipairs(state.record_buffer) do
+        local note = note_event.note
+        local delay = note_event.time_offset
+        clock.sleep(delay)
+        play_note(note)
+      end
+    end
+  end)
+end
+
+-- -------------------------
 -- GRID INPUT
 -- -------------------------
 
@@ -316,6 +407,12 @@ g.key = function(col, row, z)
         state.steps[state.step_pos] = midi
       end
 
+      -- Record into pattern buffer if recording
+      if state.recording then
+        local time_offset = clock.get_beat_sec() - state.record_start_time
+        table.insert(state.record_buffer, {note = midi, time_offset = time_offset})
+      end
+
     -- row 7: root note
     elseif row == 7 and col <= 12 then
       state.root = col - 1
@@ -325,12 +422,17 @@ g.key = function(col, row, z)
 
     -- row 8: controls
     elseif row == 8 then
-      if col <= #SCALES then
-        state.scale_idx = col
+      if col <= #BASS_SCALES then
+        -- Use bass scales for bass-specific control
+        state.bass_scale_idx = col
       elseif col >= 9 and col <= 12 then
         state.octave = col - 8
+      elseif col == 13 then
+        -- Toggle legato mode
+        state.legato = not state.legato
       elseif col == 14 then
-        state.sub_idx = (state.sub_idx % #SUBDIVISIONS) + 1
+        -- Quantize mode (rotate through options)
+        state.quantize_idx = (state.quantize_idx % #QUANTIZE_OPTS) + 1
       elseif col == 15 then
         state.playing = not state.playing
         if state.playing then state.step_pos = 1 end
@@ -356,13 +458,26 @@ local function draw_status_strip()
   screen.level(4)
   screen.font_size(8)
   screen.move(0, 7)
-  screen.text("BASS")
+  local status_text = "BASS"
+  if state.recording then
+    status_text = status_text .. " [REC]"
+  end
+  if state.legato then
+    status_text = status_text .. " LEG"
+  end
+  screen.text(status_text)
 
   -- Current scale name at center (level 6)
   screen.level(6)
-  local scale_name = SCALES[state.scale_idx].name
+  local scale_name = get_active_scale().name
   screen.move(SCREEN_W / 2 - 20, 7)
   screen.text(scale_name)
+
+  -- Quantize mode indicator
+  screen.level(5)
+  screen.font_size(7)
+  screen.move(SCREEN_W - 35, 7)
+  screen.text("Q:" .. QUANTIZE_OPTS[state.quantize_idx])
 
   -- Beat pulse dot at x=124 (right side)
   -- Flashes level 15 on downbeat, decays via sine to level 2
@@ -384,7 +499,7 @@ local function draw_live_zone()
   local zone_bottom = zone_top + zone_height
 
   local step_width = SCREEN_W / GRID_W
-  local sc = SCALES[state.scale_idx].intervals
+  local sc = get_active_scale().intervals
   local num_degrees = #sc
 
   for step = 1, GRID_W do
@@ -432,7 +547,8 @@ local function draw_context_bar()
   screen.level(8)
   screen.font_size(8)
   screen.move(0, 62)
-  screen.text(NOTE_NAMES[state.root + 1] .. " " .. SCALES[state.scale_idx].name)
+  local scale_name = get_active_scale().name
+  screen.text(NOTE_NAMES[state.root + 1] .. " " .. scale_name)
 
   -- BPM at center
   screen.level(6)
@@ -528,7 +644,12 @@ function key(n, z)
       state.playing = not state.playing
       if state.playing then state.step_pos = 1 end
     elseif n == 3 then
-      for i = 1, GRID_W do state.steps[i] = nil end
+      -- K3: toggle pattern record/loop
+      if state.recording then
+        stop_and_loop_pattern()
+      else
+        start_pattern_record()
+      end
     end
     grid_redraw()
     redraw()
@@ -565,6 +686,7 @@ function cleanup()
   -- Cancel all clock runs
   if clock_tick_id then clock.cancel(clock_tick_id) end
   if screen_clock_id then clock.cancel(screen_clock_id) end
+  if state.pattern_loop_id then clock.cancel(state.pattern_loop_id) end
 
   if g then g:all(0); g:refresh() end
   if m then
