@@ -179,8 +179,10 @@ local function mutate_pattern()
         local direction = math.random() < 0.5 and 1 or -1
         local new_degree = degree_idx + direction
         if new_degree >= 0 and new_degree < num_degrees then
-          local octave = math.floor(state.steps[step] / 12)
-          state.steps[step] = scale_note(new_degree, octave - 24)
+          local root_midi = 24 + state.root
+          local note_relative_to_root = state.steps[step] - root_midi
+          local octave = math.floor(note_relative_to_root / 12)
+          state.steps[step] = scale_note(new_degree, octave)
         end
       end
     end
@@ -189,13 +191,17 @@ end
 
 find_scale_degree = function(midi)
   local sc = get_active_scale().intervals
-  local note_in_octave = (midi - 24 - state.root) % 12
+  local root_midi = 24 + state.root
+  local note_relative_to_root = midi - root_midi
+  local note_in_octave = note_relative_to_root % 12
+  if note_in_octave < 0 then note_in_octave = note_in_octave + 12 end
+  
   for i, interval in ipairs(sc) do
     if interval == note_in_octave then
       return i - 1
     end
   end
-  return nil
+  return nil  -- fallback: no matching scale degree found
 end
 
 -- -------------------------
