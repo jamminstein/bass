@@ -311,6 +311,7 @@ local function play_note(midi)
   -- Handle legato: send note_off only if legato is off
   if not state.legato and state.last_held_note ~= nil and state.last_held_note ~= midi then
     engine.hz(0)  -- silent stop for synthesis engine
+    opxy_note_off(state.last_held_note)
   end
 
   local hz = midi_to_hz(midi)
@@ -404,7 +405,7 @@ end
 local function start_pattern_record()
   state.recording = true
   state.record_buffer = {}
-  state.record_start_time = clock.get_beat_sec()
+  state.record_start_time = util.time()
 end
 
 local function stop_and_loop_pattern()
@@ -450,7 +451,7 @@ g.key = function(col, row, z)
 
       -- Record into pattern buffer if recording
       if state.recording then
-        local time_offset = clock.get_beat_sec() - state.record_start_time
+        local time_offset = util.time() - state.record_start_time
         table.insert(state.record_buffer, {note = midi, time_offset = time_offset})
       end
 
