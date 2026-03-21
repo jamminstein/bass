@@ -120,6 +120,36 @@ for i = 1, GRID_W do state.steps[i] = nil end
 local clock_tick_id = nil
 local screen_clock_id = nil
 
+-- OP-XY MIDI
+local opxy_out = nil
+local opxy_enabled = false
+local opxy_device = 1
+local opxy_channel = 2  -- OP-XY bass channel
+
+local function opxy_note_on(note, vel)
+  if opxy_out and opxy_enabled then
+    opxy_out:note_on(note, vel, opxy_channel)
+  end
+end
+
+local function opxy_note_off(note)
+  if opxy_out and opxy_enabled then
+    opxy_out:note_off(note, 0, opxy_channel)
+  end
+end
+
+local function opxy_cc(cc_num, val)
+  if opxy_out and opxy_enabled then
+    opxy_out:cc(cc_num, math.floor(util.clamp(val, 0, 127)), opxy_channel)
+  end
+end
+
+local function opxy_all_notes_off()
+  if opxy_out and opxy_enabled then
+    opxy_out:cc(123, 0, opxy_channel)
+  end
+end
+
 -- -------------------------
 -- MUSIC UTILS
 -- -------------------------
@@ -288,6 +318,7 @@ local function play_note(midi)
   engine.release(state.note_len)
   state.last_note = midi
   state.last_held_note = midi
+  opxy_note_on(midi, 80)
   redraw()
 end
 
@@ -311,6 +342,9 @@ local function clock_tick()
       if note then
         play_note(note)
       end
+
+      -- Send cutoff CC to OP-XY (key parameter for bass)
+      opxy_cc(32, util.linlin(24, 60, 40, 120, state.last_note or 36))
 
       -- Apply swing delay for even-numbered steps
       local swing_delay = 0
@@ -680,6 +714,22 @@ function init()
   -- init MIDI input
   init_midi()
 
+  -- OP-XY MIDI setup
+  params:add_group("OP-XY", 3)
+  params:add_option("opxy_enabled", "OP-XY output", {"off", "on"}, 1)
+  params:set_action("opxy_enabled", function(x)
+    opxy_enabled = (x == 2)
+    if opxy_out == nil then
+      opxy_out = midi.connect(params:get("opxy_device"))
+    end
+  end)
+  params:add_number("opxy_device", "OP-XY MIDI device", 1, 4, 1)
+  params:set_action("opxy_device", function(val)
+    opxy_out = midi.connect(val)
+  end)
+  params:add_number("opxy_channel", "OP-XY channel", 1, 8, 2)
+  params:set_action("opxy_channel", function(x) opxy_channel = x end)
+
   -- start clock coroutines and store IDs
   clock_tick_id = clock.run(clock_tick)
   screen_clock_id = clock.run(screen_clock)
@@ -694,6 +744,7 @@ function cleanup()
   if screen_clock_id then clock.cancel(screen_clock_id) end
   if state.pattern_loop_id then clock.cancel(state.pattern_loop_id) end
 
+  opxy_all_notes_off()
   if g then g:all(0); g:refresh() end
   if m then
     for ch = 1, 16 do
