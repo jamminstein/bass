@@ -628,7 +628,7 @@ end
 
 function redraw()
   screen.clear()
-  screen.aa(1)
+  screen.aa(0)
 
   draw_status_strip()
   draw_live_zone()
